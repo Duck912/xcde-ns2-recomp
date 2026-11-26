@@ -687,3 +687,51 @@ mod tests {
         assert!(!install.join("update/old").exists());
     }
 }
+
+/// Against the live GitHub release (cargo test --release live_update -- --ignored --nocapture): the check from an older version
+/// sees this repository's newest release and its package, and an update installs that package over an install folder while
+/// the player's files stay. Downloads the package zip (~25 MB).
+#[cfg(test)]
+mod live {
+    use super::*;
+
+    #[test]
+    #[ignore]
+    fn live_update() {
+        let older = check("0.0.9", true).expect("GitHub check");
+        let rel = older.latest.clone().expect("a release");
+        println!("latest {} asset {} ({} bytes) sha256 {}", rel.version, rel.asset_name, rel.size, rel.sha256);
+        assert!(older.newer, "a 0.0.9 launcher must see {} as newer", rel.version);
+        let repo_name = REPO.rsplit('/').next().unwrap();
+        assert!(rel.asset_name.starts_with(&format!("{repo_name}-")) && rel.asset_name.ends_with("-windows-x64.zip"), "{}", rel.asset_name);
+        assert_eq!(rel.sha256.len(), 64);
+        assert!(!check(&rel.version, true).unwrap().newer, "the same version is not newer");
+
+        let root = std::env::temp_dir().join(format!("live-update-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        let put = |rel_path: &str, text: &str| {
+            let p = root.join(rel_path);
+            fs::create_dir_all(p.parent().unwrap()).unwrap();
+            fs::write(p, text).unwrap();
+        };
+        put(PACKAGE.2[0], "old launcher");
+        put(PACKAGE.2[2], "# old engine");
+        put("engine/gone_in_new_version.py", "stale");
+        put("save/account/uid/save.sav", "player save");
+        put("nxrt.ini", "[system]\nlanguage = en-US\n");
+        let shared = Shared::default();
+        let emit = |s: Status| println!("  {} {} {}", s.phase, s.done, s.message);
+        let run = Run { shared: &shared, install: root.clone(), game_dir: root.clone(), emit: &emit };
+        let st = run.run(&rel).expect("update");
+        println!("{}", st.message);
+        for f in PACKAGE.2 {
+            assert!(root.join(f).is_file(), "{f} installed");
+        }
+        assert_ne!(fs::read_to_string(root.join(PACKAGE.2[2])).unwrap(), "# old engine", "engine replaced");
+        assert!(!root.join("engine/gone_in_new_version.py").exists(), "stale package file moved out");
+        assert_eq!(fs::read_to_string(root.join("save/account/uid/save.sav")).unwrap(), "player save");
+        assert!(root.join("nxrt.ini").is_file());
+        assert!(root.join(WORK).join("old").join(PACKAGE.2[2]).is_file(), "previous engine kept in update/old");
+        let _ = fs::remove_dir_all(&root);
+    }
+}

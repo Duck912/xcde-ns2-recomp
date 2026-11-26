@@ -89,13 +89,14 @@ async function renderFiles(el, ctx, cfg, status) {
   let path = cfg.dump_dir || '';
   let report = path ? await api('validate_dump', { path }).catch(() => null) : null;
   let busy = '';
+  let folders = await api('get_folders').catch(() => null);
   const tools = status?.tools || [];
   const missing = tools.filter((x) => !x.ok);
 
   const draw = () => {
     const chosen = report?.chosen;
     const req = tools.length === 0
-      ? `<div class="tile"><span class="dot"></span><div class="grow"><div class="title">${esc(t('wiz.files.pkgTitle'))}</div><div class="detail">${esc(t('wiz.files.pkgText'))}</div></div></div>`
+      ? `<div class="tile compact"><span class="dot"></span><span class="title">${esc(t('wiz.files.pkgTitle'))}</span><span class="faint grow">${esc(t('wiz.files.pkgText'))}</span></div>`
       : missing.length === 0
         ? `<div class="tile"><span class="dot"></span><div class="grow"><div class="title">${esc(t('wiz.files.toolsOk'))}</div><div class="detail">${esc(tools.map((x) => x.name).join(' · '))}</div></div></div>`
         : `<div class="tile"><span class="badge bad">${icon('triangle-alert')}</span><div class="grow"><div class="title">${esc(t('wiz.files.toolsMissing'))}</div>${missing.map((x) => `<div class="detail"><b>${esc(x.name)}</b>: ${esc(x.hint)}</div>`).join('')}</div></div>`;
@@ -107,12 +108,25 @@ async function renderFiles(el, ctx, cfg, status) {
              ${report.dlc?.length ? `<span class="ok">&#10003; ${esc(t('wiz.files.addon'))} ${esc(report.dlc.join(', '))}</span>` : `<span class="bad">&#10007; ${esc(t('wiz.files.noAddon'))}</span>`}</div></div></div>`
         : report
           ? `<div class="tile"><span class="badge bad">${icon('x')}</span><div class="grow"><div class="title">${esc(t('wiz.files.notUsable'))}</div><div class="detail">${esc(report.path)}</div>${(report.errors || []).map((e) => `<div class="detail">${esc(e)}</div>`).join('')}</div></div>`
-          : `<div class="tile"><div class="grow"><div class="detail">${esc(t('wiz.files.none'))}</div></div></div>`;
-    const ok = Boolean(chosen && report.dlc?.length) && missing.length === 0 && !busy;
+          : `<div class="tile compact"><span class="faint">${esc(t('wiz.files.none'))}</span></div>`;
+    const gb = (n) => (n == null ? '' : t('wiz.folders.free', { size: (n / (1 << 30)).toFixed(0) }));
+    // One compact line per folder: name, path, free space, Change (the hint is the row's tooltip)
+    const folderRow = (which, f, title, hint) => `<div class="tile compact folder-row" title="${esc(hint)}">${icon(which === 'game' ? 'hard-drive' : 'file-archive')}
+        <span class="title">${esc(title)}</span><code class="grow path">${esc(f.path)}</code>
+        <span class="${f.need && f.free != null && f.free < f.need ? 'bad-text' : 'faint'}">${f.need ? `${esc(t('wiz.folders.needs', { size: (f.need / (1 << 30)).toFixed(0) }))} · ` : ''}${f.free != null ? esc(gb(f.free)) : ''}</span>
+        <button class="btn sm" data-folder="${which}" ${busy ? 'disabled' : ''}>${esc(t('wiz.folders.change'))}</button>
+        ${f.is_default ? '' : `<button class="btn quiet sm" data-folder-reset="${which}" ${busy ? 'disabled' : ''}>${esc(t('wiz.folders.reset'))}</button>`}</div>`;
+    const foldersHtml = folders
+      ? `<div class="section-label">${esc(t('wiz.folders.title'))}</div>
+         ${folderRow('game', folders.game, t('wiz.folders.game'), t('wiz.folders.gameHint'))}
+         ${folderRow('unpack', folders.unpack, t('wiz.folders.unpack'), t('wiz.folders.unpackHint'))}`
+      : '';
+    const ok = Boolean(chosen && report.dlc?.length) && missing.length === 0 && !busy;   // XC:DE needs its add-on
     el.innerHTML = `<div class="wiz">
       <h1>${esc(t('wiz.files.title'))}</h1>
       <p class="lead">${esc(t('wiz.files.lead'))}</p>
       ${req}
+      ${foldersHtml}
       <div class="section-label">${esc(t('wiz.files.dump'))}</div>
       ${sel}
       <div class="row">
@@ -128,6 +142,20 @@ async function renderFiles(el, ctx, cfg, status) {
     el.querySelector('#next').addEventListener('click', async () => {
       try { await api('save_dump', { path }); wizStep = 'options'; ctx.go('home'); } catch (e) { toast(errText(e), 'error'); }
     });
+    el.querySelectorAll('[data-folder]').forEach((b) => b.addEventListener('click', async () => {
+      const which = b.dataset.folder;
+      const picked = await api('pick_folder', { title: t(which === 'game' ? 'wiz.folders.game' : 'wiz.folders.unpack'), start: null });
+      if (!picked) return;
+      try {
+        if (which === 'game' && folders?.built && !(await window.confirm(t('wiz.folders.moveWarn')))) return;
+        folders = await api('set_folder', { which, path: picked });
+      } catch (e) { toast(errText(e), 'error'); }
+      draw();
+    }));
+    el.querySelectorAll('[data-folder-reset]').forEach((b) => b.addEventListener('click', async () => {
+      try { folders = await api('set_folder', { which: b.dataset.folderReset, path: '' }); } catch (e) { toast(errText(e), 'error'); }
+      draw();
+    }));
     el.querySelector('#pick-folder').addEventListener('click', async () => {
       const picked = await api('pick_folder', { title: t('wiz.files.pickFolder'), start: path || null });
       if (!picked) return;

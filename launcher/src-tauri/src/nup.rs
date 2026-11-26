@@ -11,7 +11,7 @@ const NO_DIR: u32 = 0xFFFF_FFFF;
 const KIND_BASE: u8 = 0;
 const KIND_UPDATE: u8 = 1;
 const KIND_ADDON: u8 = 2;
-const MARKER: &str = ".nup_done";
+pub const MARKER: &str = ".nup_done";
 
 struct Package {
     title_id: u64,

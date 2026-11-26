@@ -80,6 +80,8 @@ export const zh = {
     'nav.main': '主菜单',
     'nav.play': '游玩',
     'nav.mods': '模组',
+    'nav.saves': '存档',
+    'nav.clean': '清理',
     'nav.setup': '构建',
     'nav.settings': '设置',
     'nav.about': '关于',

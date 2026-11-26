@@ -5,6 +5,7 @@
 
 mod cpu;
 mod dump;
+mod files;
 mod fsr;
 mod ini;
 mod locale;
@@ -48,12 +49,25 @@ struct Config {
     lang: String,
     /// Build without NVIDIA Streamline (the game's DLSS then falls back to FSR 1): setup runs with --no-streamline.
     no_streamline: bool,
+    /// Where a picked .nup is unpacked: <unpack_dir>/xcde-nup. Empty: beside the game (<game folder>/nup_dump in a package).
+    unpack_dir: String,
 }
+
+/// The app id launchers before 0.1.1 shared with upstream xc2-ns2-recomp; their settings are carried over once.
+const OLD_CONFIG_ID: &str = "io.github.weile10000.xc2-ns2-recomp";
 
 fn config_path(app: &AppHandle) -> Result<PathBuf, String> {
     let dir = app.path().app_config_dir().map_err(|e| e.to_string())?;
     fs::create_dir_all(&dir).map_err(|e| format!("cannot create {}: {}", dir.display(), e))?;
-    Ok(dir.join("launcher.json"))
+    let path = dir.join("launcher.json");
+    if !path.is_file() {
+        // The first start with this launcher's own app id: take over the settings the 0.1.0 launcher kept under the shared id
+        // (the dump, the game folder, the options), so an update does not ask for them again.
+        if let Some(old) = dir.parent().map(|p| p.join(OLD_CONFIG_ID).join("launcher.json")).filter(|p| p.is_file()) {
+            let _ = fs::copy(&old, &path);
+        }
+    }
+    Ok(path)
 }
 
 fn load_config(app: &AppHandle) -> Config {
@@ -206,6 +220,243 @@ fn import_saves(app: AppHandle, path: String) -> Result<String, String> {
     ))
 }
 
+/// The folder the game reads its saves from: <run folder>\save in a package (play.rs: NXRT_FS_SAVE_DIR), the profile's
+/// work\save-xcde in a checkout (config/profiles/xcde.ini, run by tools/run/play-xcde.cmd).
+fn save_dir_of(cfg: &Config, repo: &Path) -> PathBuf {
+    if package_tools().is_some() {
+        game_dir_of(cfg, repo).join("save")
+    } else {
+        repo.join("work").join("save-xcde")
+    }
+}
+
+/// Saves and clean-up change files the game and the build use: neither runs while the game or a build does.
+fn files_busy(app: &AppHandle) -> Result<(), String> {
+    if app.state::<play::PlayState>().0.lock().map(|s| s.state == "running").unwrap_or(false) {
+        return Err("Close the game first.".into());
+    }
+    let setup = app.state::<Arc<setup::Shared>>();
+    if setup.progress.lock().map(|p| p.state == "running").unwrap_or(false) {
+        return Err("Wait until the build has finished.".into());
+    }
+    Ok(())
+}
+
+#[tauri::command]
+fn saves_overview(app: AppHandle) -> Result<files::SavesOverview, String> {
+    let cfg = load_config(&app);
+    let repo = need_repo(&cfg)?;
+    let game = game_dir_of(&cfg, &repo);
+    let save = save_dir_of(&cfg, &repo);
+    Ok(files::SavesOverview {
+        save_dir: dump::fwd(&save),
+        backup_dir: dump::fwd(&files::backup_dir(&game)),
+        files: files::list_saves(&save),
+        backups: files::list_backups(&game),
+    })
+}
+
+#[tauri::command]
+fn open_saves_dir(app: AppHandle) -> Result<(), String> {
+    let cfg = load_config(&app);
+    let repo = need_repo(&cfg)?;
+    let save = save_dir_of(&cfg, &repo);
+    // the account folder holds the .sav files; open it when the game has made one
+    let account = fs::read_dir(save.join("account"))
+        .ok()
+        .and_then(|rd| rd.flatten().map(|e| e.path()).find(|q| q.is_dir() && !q.to_string_lossy().contains(".work.")));
+    let dir = account.unwrap_or(save);
+    fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+    play::open_with_shell(&dir)
+}
+
+#[tauri::command]
+fn open_backups_dir(app: AppHandle) -> Result<(), String> {
+    let cfg = load_config(&app);
+    let dir = files::backup_dir(&game_dir_of(&cfg, &need_repo(&cfg)?));
+    fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+    play::open_with_shell(&dir)
+}
+
+#[tauri::command]
+fn backup_saves(app: AppHandle) -> Result<String, String> {
+    files_busy(&app)?;
+    let cfg = load_config(&app);
+    let repo = need_repo(&cfg)?;
+    files::make_backup(&save_dir_of(&cfg, &repo), &game_dir_of(&cfg, &repo), "")
+}
+
+#[tauri::command]
+fn restore_saves(app: AppHandle, id: String) -> Result<Option<String>, String> {
+    files_busy(&app)?;
+    let cfg = load_config(&app);
+    let repo = need_repo(&cfg)?;
+    files::restore_backup(&save_dir_of(&cfg, &repo), &game_dir_of(&cfg, &repo), &id)
+}
+
+#[tauri::command]
+fn delete_save_backup(app: AppHandle, id: String) -> Result<(), String> {
+    files_busy(&app)?;
+    let cfg = load_config(&app);
+    files::delete_backup(&game_dir_of(&cfg, &need_repo(&cfg)?), &id)
+}
+
+/// The run folder, the checkout's build folder (None in a package) and where the game's data links point.
+fn clean_context(app: &AppHandle) -> Result<(PathBuf, PathBuf, Option<PathBuf>, Vec<PathBuf>), String> {
+    let cfg = load_config(app);
+    let repo = need_repo(&cfg)?;
+    let game = game_dir_of(&cfg, &repo);
+    let build = package_tools().is_none().then(|| repo.join("xcde").join("build").join("200"));
+    let mut links = vec![game.join("romfs"), game.join("dlc"), game.join("exefs")];
+    if let Some(b) = &build {
+        links.push(b.join("game").join("romfs"));
+        links.push(b.join("game").join("dlc"));
+    }
+    if let Ok(p) = paths(&cfg) {
+        links.push(p.romfs.clone());
+        links.push(p.exefs.clone());
+        if let Some(d) = &p.dlc {
+            links.push(d.clone());
+        }
+    }
+    let linked = links.iter().filter_map(|l| fs::canonicalize(l).ok()).chain(links.iter().cloned()).collect();
+    Ok((game, unpack_dir_of(&cfg, &repo), build, linked))
+}
+
+#[tauri::command]
+fn clean_scan(app: AppHandle) -> Result<Vec<files::CleanItem>, String> {
+    let (game, nup, build, linked) = clean_context(&app)?;
+    Ok(files::clean_items(&game, &nup, build.as_deref(), &linked))
+}
+
+#[tauri::command]
+fn clean_run(app: AppHandle, ids: Vec<String>) -> Result<u64, String> {
+    files_busy(&app)?;
+    let (game, nup, build, linked) = clean_context(&app)?;
+    files::clean(&game, &nup, build.as_deref(), &linked, &ids)
+}
+
+/// Where a picked .nup is unpacked. Always a folder of its own (an unpack of another .nup clears it first), so a chosen
+/// folder gets an xcde-nup subfolder rather than being used as it is.
+fn unpack_dir_of(cfg: &Config, repo: &Path) -> PathBuf {
+    if !cfg.unpack_dir.trim().is_empty() {
+        PathBuf::from(cfg.unpack_dir.trim()).join("xcde-nup")
+    } else if package_tools().is_some() {
+        game_dir_of(cfg, repo).join("nup_dump")
+    } else {
+        repo.join("game").join("nup_dump")
+    }
+}
+
+/// Free bytes on the volume that holds `p` (its nearest existing parent). None when it cannot be read.
+#[cfg(windows)]
+fn free_bytes(p: &Path) -> Option<u64> {
+    use std::os::windows::ffi::OsStrExt;
+    #[link(name = "kernel32")]
+    extern "system" {
+        fn GetDiskFreeSpaceExW(dir: *const u16, avail: *mut u64, total: *mut u64, free: *mut u64) -> i32;
+    }
+    let mut q = p.to_path_buf();
+    while !q.exists() {
+        q = q.parent()?.to_path_buf();
+    }
+    let wide: Vec<u16> = q.as_os_str().encode_wide().chain(std::iter::once(0)).collect();
+    let (mut avail, mut total, mut free) = (0u64, 0u64, 0u64);
+    (unsafe { GetDiskFreeSpaceExW(wide.as_ptr(), &mut avail, &mut total, &mut free) } != 0).then_some(avail)
+}
+
+#[cfg(not(windows))]
+fn free_bytes(_: &Path) -> Option<u64> {
+    None
+}
+
+/// What the build writes into the game folder (lifted code, objects, the exe, Streamline, logs): measured 1.4 GB, with room.
+const GAME_NEED: u64 = 3 << 30;
+/// An unpacked XC:DE S2E .nup: program 0's RomFS (13.6 GiB) and the add-on (20 GiB), with room.
+const UNPACK_NEED: u64 = 40 << 30;
+
+#[derive(Serialize)]
+struct FolderInfo {
+    path: String,
+    is_default: bool,
+    free: Option<u64>,
+    /// bytes this folder still needs (0 once its work is done: built, or already unpacked)
+    need: u64,
+}
+
+fn gib(n: u64) -> String {
+    format!("{:.0} GB", n as f64 / (1u64 << 30) as f64)
+}
+
+/// Err when the volume holding `dir` has less than `need` free (unknown free space is not an error).
+fn check_space(dir: &Path, need: u64, what: &str) -> Result<(), String> {
+    match free_bytes(dir) {
+        Some(free) if free < need => Err(format!(
+            "Not enough disk space: {} needs about {}, and only {} is free where it goes ({}). Free some space or choose another folder on the Game files step.",
+            what, gib(need), gib(free), dump::fwd(dir)
+        )),
+        _ => Ok(()),
+    }
+}
+
+#[derive(Serialize)]
+struct Folders {
+    game: FolderInfo,
+    unpack: FolderInfo,
+    /// the game is already built in the game folder
+    built: bool,
+}
+
+/// The page to open on (XCDE_LAUNCHER_PAGE), for screenshots; empty: home.
+#[tauri::command]
+fn start_page() -> String {
+    std::env::var("XCDE_LAUNCHER_PAGE").unwrap_or_default()
+}
+
+#[tauri::command]
+fn get_folders(app: AppHandle) -> Result<Folders, String> {
+    let cfg = load_config(&app);
+    let repo = need_repo(&cfg)?;
+    let game = game_dir_of(&cfg, &repo);
+    let unpack = unpack_dir_of(&cfg, &repo);
+    let exe = if package_tools().is_some() { game.join("xcde.exe") } else { setup::exe_path(&repo) };
+    Ok(Folders {
+        game: FolderInfo { path: dump::fwd(&game), is_default: cfg.game_dir.trim().is_empty(), free: free_bytes(&game), need: if exe.is_file() { 0 } else { GAME_NEED } },
+        unpack: FolderInfo {
+            path: dump::fwd(&unpack),
+            is_default: cfg.unpack_dir.trim().is_empty(),
+            free: free_bytes(&unpack),
+            need: if unpack.join(nup::MARKER).is_file() { 0 } else { UNPACK_NEED },
+        },
+        built: exe.is_file(),
+    })
+}
+
+/// Sets the game folder or the unpack folder ("game" | "unpack"); an empty path goes back to the default. A drive's root
+/// is refused for the game folder (setup and Clean up write and remove folders inside it).
+#[tauri::command]
+fn set_folder(app: AppHandle, which: String, path: String) -> Result<Folders, String> {
+    files_busy(&app)?;
+    let mut cfg = load_config(&app);
+    let p = path.trim().to_string();
+    if !p.is_empty() {
+        let pb = PathBuf::from(&p);
+        if !pb.is_absolute() {
+            return Err("Choose a full folder path.".into());
+        }
+        if which == "game" && pb.parent().is_none() {
+            return Err("Choose a folder, not the root of a drive (for example D:/Games/XCDE).".into());
+        }
+    }
+    match which.as_str() {
+        "game" => cfg.game_dir = p,
+        "unpack" => cfg.unpack_dir = p,
+        _ => return Err("unknown folder".into()),
+    }
+    save_config(app.clone(), cfg)?;
+    get_folders(app)
+}
+
 #[derive(Serialize)]
 struct Overview {
     repo_dir: String,
@@ -278,8 +529,13 @@ async fn import_nup(app: AppHandle, state: State<'_, Arc<setup::Shared>>, path: 
     }
     let cfg = load_config(&app);
     let repo = need_repo(&cfg)?;
-    let out = if package_tools().is_some() { game_dir_of(&cfg, &repo).join("nup_dump") } else { repo.join("game").join("nup_dump") };
+    let out = unpack_dir_of(&cfg, &repo);
     let src = PathBuf::from(path.trim());
+    // A first unpack needs about the .nup's own size again (and a bit more: some of it is compressed inside the .nup).
+    if !out.join(nup::MARKER).is_file() {
+        let need = fs::metadata(&src).map(|m| m.len() / 100 * 115).unwrap_or(UNPACK_NEED).max(1 << 30);
+        check_space(&out, need, "unpacking the .nup")?;
+    }
     let emitter = app.clone();
     let res = tauri::async_runtime::spawn_blocking(move || {
         let mut last = 0u64;
@@ -458,6 +714,10 @@ fn start_setup(app: AppHandle, state: State<Arc<setup::Shared>>) -> Result<(), S
     }
     let cfg = load_config(&app);
     let p = paths(&cfg)?;
+    let exe = if package_tools().is_some() { p.game_dir.join("xcde.exe") } else { setup::exe_path(&p.repo) };
+    if !exe.is_file() {
+        check_space(&p.game_dir, GAME_NEED, "building the game")?;
+    }
     {
         let mut pr = state.progress.lock().unwrap();
         if pr.state == "running" {
@@ -914,7 +1174,18 @@ fn main() {
             cancel_setup,
             play,
             game_status,
-    import_saves,
+            import_saves,
+            saves_overview,
+            open_saves_dir,
+            open_backups_dir,
+            backup_saves,
+            restore_saves,
+            delete_save_backup,
+            clean_scan,
+            clean_run,
+            get_folders,
+            start_page,
+            set_folder,
             steam_status,
             add_to_steam,
             open_game_file,

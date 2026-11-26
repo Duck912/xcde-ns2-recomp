@@ -101,6 +101,15 @@ fn curl() -> Command {
     c
 }
 
+/// The player package among a release's assets: <repo name>-<version>-windows-x64.zip (this project's releases; the NVN-HLE
+/// library and source zips have other names), or upstream's XC2-package-dist-<version>.zip.
+fn is_package_asset(n: &str) -> bool {
+    let repo_name = REPO.rsplit('/').next().unwrap_or(REPO);
+    n.ends_with(PACKAGE.0)
+        && !n.contains("-src")
+        && (n.starts_with(&format!("{repo_name}-")) || n.starts_with("XC2-package-dist-"))
+}
+
 fn parse_release(v: &serde_json::Value) -> Release {
     let tag = v["tag_name"].as_str().unwrap_or_default();
     let version = tag.trim_start_matches(['v', 'V']).to_string();
@@ -108,7 +117,7 @@ fn parse_release(v: &serde_json::Value) -> Release {
     let none = serde_json::Value::Null;
     let zip = assets
         .iter()
-        .find(|a| a["name"].as_str().is_some_and(|n| n.starts_with("XC2-package-dist-") && n.ends_with(PACKAGE.0)))
+        .find(|a| a["name"].as_str().is_some_and(is_package_asset))
         .unwrap_or(&none);
     let digest = zip["digest"].as_str().unwrap_or_default();
     Release {

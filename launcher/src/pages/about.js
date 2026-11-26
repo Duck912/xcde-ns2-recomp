@@ -87,7 +87,8 @@ function updateCard(cfg) {
     </div>`;
 }
 
-export async function render(el) {
+/** mode 'about': the gear's About tab (no Updates card); 'update': the title bar's Update page (only the Updates card). */
+export async function render(el, mode = 'about') {
   let version = '';
   try {
     version = await getVersion();
@@ -96,15 +97,26 @@ export async function render(el) {
   }
   let cfg = await api('get_config');
   upd.status = await api('update_status');
+  // the download's progress is read from update_status while an update runs (no event carries it)
+  const poll = setInterval(async () => {
+    if (!el.isConnected) return clearInterval(poll);
+    if (upd.status.state !== 'running') return;
+    upd.status = await api('update_status').catch(() => upd.status);
+    draw();
+  }, 500);
 
   function draw() {
+    if (mode === 'update') {
+      el.innerHTML = `<div class="page">${updateCard(cfg)}</div>`;
+      bind();
+      return;
+    }
     el.innerHTML = `
     <div class="page">
       <div class="hero">
         <h1>${esc(t('about.title'))}</h1>
         <p class="dim">${esc(t('about.intro'))}</p>
       </div>
-      ${updateCard(cfg)}
       <div class="card" id="reportcard">
         <h2>${icon('info')}${esc(t('about.reportTitle'))}</h2>
         <p class="dim">${esc(t('about.reportHint'))}</p>
@@ -128,15 +140,25 @@ export async function render(el) {
         <div>${esc(t('about.legal'))}</div>
       </div>
     </div>`;
+    bind();
+  }
+
+  function bind() {
     refreshIcons();
     el.querySelector('#check')?.addEventListener('click', () => checkNow());
     el.querySelector('#auto')?.addEventListener('change', async (ev) => {
       cfg = { ...cfg, skip_update_check: !ev.target.checked };
       await api('save_config', { config: cfg }).catch((e) => toast(errText(e), 'error'));
     });
-    el.querySelector('#update')?.addEventListener('click', () =>
-      api('start_update', { release: upd.check.latest }).catch((e) => toast(errText(e), 'error')),
-    );
+    el.querySelector('#update')?.addEventListener('click', async () => {
+      try {
+        await api('start_update', { release: upd.check.latest });
+        upd.status = await api('update_status');
+        draw();
+      } catch (e) {
+        toast(errText(e), 'error');
+      }
+    });
     el.querySelector('#cancel')?.addEventListener('click', () => api('cancel_update'));
     el.querySelector('#report')?.addEventListener('click', async () => {
       try {
@@ -152,7 +174,7 @@ export async function render(el) {
 
   // redraw on update events while this page is shown
   const listener = () => {
-    if (!el.querySelector('#updates')) {
+    if (!el.isConnected) {
       upd.listeners.delete(listener);
       return;
     }

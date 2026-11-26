@@ -6,6 +6,7 @@ import {
   ShieldCheck, Keyboard, HardDrive, FileArchive, Terminal, ListChecks, Hammer, Circle, Sparkles, Gauge,
   Download, RefreshCw, RotateCw, CircleArrowUp, Languages, Package,
   Plus, ChevronUp, ChevronDown, ChevronRight, GripVertical, Minus, X, Check, ArrowLeft, ScrollText,
+  Archive, RotateCcw, Trash, BrushCleaning, FolderInput, CircleQuestionMark,
 } from 'lucide';
 
 const ICONS = {
@@ -14,6 +15,7 @@ const ICONS = {
   ShieldCheck, Keyboard, HardDrive, FileArchive, Terminal, ListChecks, Hammer, Circle, Sparkles, Gauge,
   Download, RefreshCw, RotateCw, CircleArrowUp, Languages, Package,
   Plus, ChevronUp, ChevronDown, ChevronRight, GripVertical, Minus, X, Check, ArrowLeft, ScrollText,
+  Archive, RotateCcw, Trash, BrushCleaning, FolderInput, CircleQuestionMark,
 };
 
 /** Calls a Rust command. */

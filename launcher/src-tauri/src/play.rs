@@ -258,7 +258,9 @@ fn package_command(dir: &Path, exe: &Path) -> Command {
         .arg("window")
         .arg("--log")
         .arg(&log);
-    for (k, v) in read_launch_env(dir) {
+    let launch_env = read_launch_env(dir);
+    let set_by_setup = |key: &str| launch_env.iter().any(|(k, _)| k == key);
+    for (k, v) in &launch_env {
         c.env(k, v);
     }
     // The runtime reads "nxrt.ini" from the working directory, and the working directory is not something the game
@@ -276,12 +278,17 @@ fn package_command(dir: &Path, exe: &Path) -> Command {
         .env("NXRT_NVN_PRESENT_INTERVAL_HZ", present_hz);
     // XC:DE: the setup engine (tools/setup/xcde_setup.py) puts program 0's RomFS at <run folder>/romfs and the add-on at
     // <run folder>/dlc/<title id>/romfs.
-    c.env("NXRT_FS_ROMFS", dir.join("romfs"))
+    // ... unless setup wrote where the data really is (a game folder on a drive that cannot hold links, exFAT or FAT32, reads
+    // the RomFS and add-ons straight from the unpack folder: launch.env names them).
+    if !set_by_setup("NXRT_FS_ROMFS") {
+        c.env("NXRT_FS_ROMFS", dir.join("romfs"));
+    }
+    c
         .env("NXRT_FS_SAVE_DIR", dir.join("save"))
         .env("NXRT_NVN_SHADER_CACHE", dir.join("shader_cache").join("spirv"))
         .env("NXRT_NVN_DUMP_MISSING", dir.join("work").join("missing"));
     let dlc = dir.join("dlc");
-    if dlc.is_dir() {
+    if dlc.is_dir() && !set_by_setup("NXRT_AOC_DIR") {
         c.env("NXRT_AOC_DIR", dlc);
     }
     copy_streamline(dir);

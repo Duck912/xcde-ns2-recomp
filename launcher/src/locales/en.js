@@ -577,7 +577,7 @@ export const en = {
     'about.licence': 'Licence',
     'about.builtWith': 'Built with',
     'about.credits': 'Credits',
-    'about.creditsText': 'NVN-HLE (written by duck912 in the Eglantine Community, ported to n2den), xc2-ns2-recomp by weile10000, nxrecomp and the fefw-recomp runtime; see README.md.',
+    'about.creditsText': 'NVN-HLE (duck912 and the Eglantine Community, ported to n2den), xc2-ns2-recomp by weile10000, nxrecomp and the fefw-recomp runtime; see README.md.',
     'about.noGameFiles': 'No game files included.',
     'about.reportTitle': 'Something went wrong?',
     'about.reportHint':
